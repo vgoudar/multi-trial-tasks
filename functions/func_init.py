@@ -1,7 +1,6 @@
 import numpy as np
 import os
 import time
-#import matplotlib.pyplot as plt
 import tensorflow as tf
 import sys
 
@@ -14,25 +13,26 @@ def initconstants(dt,tau,N,task):
 
     constants = {}
 
-    constants['tau_e']      = tf.constant(tau, dtype=tf.float32)
-    constants['tau_i']      = tf.constant(tau/2, dtype=tf.float32)
-    constants['tau_n']      = tf.constant(tau, dtype=tf.float32)
+    # constants['tau_e']      = tf.constant(tau, dtype=tf.float32)
+    # constants['tau_i']      = tf.constant(tau/2, dtype=tf.float32)
+    # constants['tau_n']      = tf.constant(tau, dtype=tf.float32)
     constants['dt']         = tf.constant(dt, dtype=tf.float32)
 
-    constants['eps1']       = tf.constant((1.0-dt/tau), dtype=tf.float32)
-    constants['eps2']       = tf.constant(np.sqrt(2.0*dt/tau), dtype=tf.float32)
+    constants['eps1']       = tf.constant((1.0-dt/tau), dtype=tf.float32) # decay
+    constants['eps2']       = tf.constant(np.sqrt(2.0*dt/tau), dtype=tf.float32) # noise-process
 
-    constants['N_exc']      = int(0.8*N)
-    constants['N_inh']      = int(0.2*N)
-    constants['N']          = N
+    # constants['N_exc']      = int(0.8*N)
+    # constants['N_inh']      = int(0.2*N)
+    constants['N']          = N # number of units
 
+    # for euler integration
     Tinvdiag                = np.ones([N])/tau
     # Tinvdiag[int(0.8*N):]   = 2/tau
     constants['Tinv']       = tf.constant(np.diag(Tinvdiag), dtype=tf.float32)
 
-    mask                    = np.ones([N,N])
-    mask[:,int(0.8*N):]     = -1
-    constants['mask']       = tf.constant(mask, dtype=tf.float32)
+    # mask                    = np.ones([N,N])
+    # mask[:,int(0.8*N):]     = -1
+    # constants['mask']       = tf.constant(mask, dtype=tf.float32)
 
     if task == '2afc-reversal':
 
@@ -51,17 +51,17 @@ def initconstants(dt,tau,N,task):
         constants['num_stages'] = 10
 
     elif task == 'wcst':
-        constants['N_out'] = 7
-        constants['N_stim_singleCard'] = 12
+        constants['N_out'] = 7 # 4 for target card, 3 for aux loss - current dimension
+        constants['N_stim_singleCard'] = 12 # 4 per dimension - shape, color, numerosity
         constants['N_stim'] = constants['N_stim_singleCard']*2 + 6 # 12 for single reference card, 12 for test card, 4 for action, 2 for reward
         constants['T_stim_singleCard'] = int(0.25/dt)
         constants['T_stim'] = constants['T_stim_singleCard']*4
         constants['T_resp']  = int(0.5/dt)
         constants['T_FB']  = int(0.5/dt)
         constants['T_ITI']  = int(0.5/dt)
-        constants['blockLen_mn']  = 8. #15. # mean no. of trials with given rule
-        constants['blockLen_sd']  = 2. #3. # std of no. of trials with given rule
-        constants['epLen']  = 15 #50 # no. of consecutive trials simulated and trained on
+        constants['blockLen_mn']  = 8. # mean no. of trials with given rule (default; see stages)
+        constants['blockLen_sd']  = 2. # std of no. of trials with given rule (default; see stages)
+        constants['epLen']  = 15 # no. of consecutive trials simulated and trained on (default; see stages)
         constants['batchSize'] = 100
         constants['ruleSupWt'] = 1.0
         constants['thresh'] = 2
@@ -70,6 +70,7 @@ def initconstants(dt,tau,N,task):
 
     return constants
 
+# Initialize weights
 def initvariables(task,constants):
     initializer = tf.keras.initializers.Orthogonal(gain=1)#0.9)
     Wraw = initializer(shape=[constants['N'], constants['N']])

@@ -1,5 +1,8 @@
+# Curriculum schedule for
+# a) skip connection annealing
+# b) training across trials
 stages = dict(
-    [('WCST', [dict(blockLen_mn=5.,
+    [('wcst', [dict(blockLen_mn=5.,
                  blockLen_sd=0.,
                  epLen=5,
                  batchSize=100,
@@ -32,7 +35,7 @@ stages = dict(
                dict(ratio=0.70),
                dict(ratio=0.80),
                dict(ratio=0.90),
-               dict(ratio=1.0)]),
+               dict(ratio=1.00)]),
 
      ('2afc-reversal', [dict(ratio=0.10),
                         dict(ratio=0.20, learning_rate=5e-4),

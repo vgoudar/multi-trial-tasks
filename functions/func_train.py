@@ -3,9 +3,8 @@ import numpy as np
 from functions.func_init import *
 
 # -------------------------------------------------------
-# Simulate dynamics
+# Simulate dynamics with Euler approximation
 # -------------------------------------------------------
-
 @tf.function
 def compute_dueta(u,eta,W,bias,hinput,constants,activation):
 
@@ -15,19 +14,25 @@ def compute_dueta(u,eta,W,bias,hinput,constants,activation):
 
     return du,eta
 
+# -------------------------------------------------------
+# Unroll graph through simulation time
+# -------------------------------------------------------
 @tf.function
 def compute_uall(u,eta,W,bias,hinput,constants,skip,ratio,timesteps,activation, t_elapsed, uskip):
 
+    # Compute and save skip
     if skip>0 and t_elapsed == 0:
         du,eta = compute_dueta(u,eta,W,bias,hinput,constants,activation)
         uskip = tf.identity(u) + skip*du
-    uall  = tf.TensorArray(dtype=tf.float32, size=timesteps)
+    uall  = tf.TensorArray(dtype=tf.float32, size=timesteps) # to save hidden state
 
+    # Loop through time
     for t in tf.range(timesteps):
 
         du,eta = compute_dueta(u,eta,W,bias,hinput,constants,activation)
         u = u + du
 
+        # Apply skip and update it for the next skip
         if skip>0 and (t_elapsed+t)%skip==(skip-1):
             u = ratio*u + (1-ratio)*uskip
             uskip = tf.identity(u) + skip*du
@@ -37,8 +42,8 @@ def compute_uall(u,eta,W,bias,hinput,constants,skip,ratio,timesteps,activation, 
     return u,eta, uskip, uall.stack()
 
 # -------------------------------------------------------
-# Task-specific training functions
-# FIXED GRAPHS only (i.e. accelerated by @tf.function)
+# Simulation of 2AFC task with reversals
+# (accelerated by @tf.function)
 # -------------------------------------------------------
 @tf.function
 def train_2afcrev(constants, tv, activation, opt, skip, ratio, input0, input1, input2, input2Var, target, ruleState, fbs, lossMask):
@@ -53,6 +58,7 @@ def train_2afcrev(constants, tv, activation, opt, skip, ratio, input0, input1, i
     u = tf.zeros([constants['batchSize'] , constants['N'], 1])
     eta = tf.random.normal(tf.shape(u))
 
+    # Single time step warm up
     # W = tf.abs(Wraw) * constants['mask']
     W = Wraw
     input0_curr = Win @ input0
@@ -65,7 +71,8 @@ def train_2afcrev(constants, tv, activation, opt, skip, ratio, input0, input1, i
     cost = 0.
     epsilon = 0.0000000001
     with tf.GradientTape() as tape:
-        for i in tf.range(epLen):
+        for i in tf.range(epLen): # Loop through multiple trials
+            # Randomize stimuli (and corresponding target) for current trial
             perm = tf.constant(np.random.permutation(constants['batchSize']), dtype=tf.int32)
             input1 = tf.gather(input1, perm, axis=0)
             target = tf.gather(target, perm, axis=0)
@@ -76,7 +83,7 @@ def train_2afcrev(constants, tv, activation, opt, skip, ratio, input0, input1, i
             # Sample stimulus
             timesteps = constants['T_stim']
             u, eta, uskip, uall = compute_uall(u, eta, W, bias, input1_curr, constants, skip, ratio, timesteps, activation, t_elapsed, uskip)
-            upenalty += activitypenalty * tf.reduce_mean(uall ** 2)
+            upenalty += activitypenalty * tf.reduce_mean(uall ** 2) # Activity regularization
             t_elapsed += timesteps
 
             # Delay period
@@ -97,9 +104,11 @@ def train_2afcrev(constants, tv, activation, opt, skip, ratio, input0, input1, i
             pred = tf.nn.softmax(logits, axis=2)
             pred = tf.where(pred == 1, pred-epsilon, pred)
             pred = tf.where(pred == 0, pred+epsilon, pred)
-            
+
+            # Generate rule-specific target
             targ = (1.-ruleState[:,i])*target + ruleState[:,i]*(1.-target)
 
+            # Calculate loss
             X = tf.reduce_mean(loss(targ * timebroadcast, pred), axis=0)
             X = tf.reduce_mean(X*lossMask[:,i])
             cost = cost + X
@@ -110,10 +119,10 @@ def train_2afcrev(constants, tv, activation, opt, skip, ratio, input0, input1, i
                 fb = tf.cast(targ == action, tf.float32)
                 fbs[i,:].assign(fb)
                 input2Var.assign(input2)
-                input2Var[:,4,0].assign(action)
-                input2Var[:,5,0].assign(1-action)
-                input2Var[:,6,0].assign(fb)
-                input2Var[:,7,0].assign(1-fb)
+                input2Var[:,4,0].assign(action)   # Action taken (alt 1)
+                input2Var[:,5,0].assign(1-action) # Action taken (alt 2)
+                input2Var[:,6,0].assign(fb) # Positive feedback
+                input2Var[:,7,0].assign(1-fb) # Negative feedback
             input2_curr = Win @ input2Var
 
             # Feedback period
@@ -128,17 +137,22 @@ def train_2afcrev(constants, tv, activation, opt, skip, ratio, input0, input1, i
             upenalty += activitypenalty * tf.reduce_mean(uall ** 2)
             t_elapsed += timesteps
 
-        wreg = 0.0001*tf.math.reduce_sum(tf.math.square(W))
+        wreg = 0.0001*tf.math.reduce_sum(tf.math.square(W)) # Weight regularization
 
         # loss = tf.reduce_mean(tf.where(tf.math.is_nan(upenalty), wreg, cost + upenalty))
         loss = cost + upenalty + wreg
-        grads = tape.gradient(loss, tv)
+        grads = tape.gradient(loss, tv) # Backprop
 
     #grads = [tf.clip_by_norm(g, 2) for g in grads]            
-    opt.apply_gradients(zip(grads, tv))
+    opt.apply_gradients(zip(grads, tv)) # Gradient update
 
     return cost, upenalty, wreg
 
+
+# -------------------------------------------------------
+# Simulation of classic WCST
+# (accelerated by @tf.function)
+# -------------------------------------------------------
 @tf.function
 def train_wcst(constants, tv, activation, opt, skip, ratio, input0, input1, input2, input3, input4, input4Var, target, fbs,lossMask, ruleState, t0, tVar):
     activitypenalty = 1e-4
@@ -153,6 +167,7 @@ def train_wcst(constants, tv, activation, opt, skip, ratio, input0, input1, inpu
     u = tf.zeros([constants['batchSize'] , constants['N'], 1])
     eta = tf.random.normal(tf.shape(u))
 
+    # Single time step warm up
     #W = tf.abs(Wraw) * constants['mask']
     W = Wraw
     input0_curr = Win @ input0
@@ -167,7 +182,7 @@ def train_wcst(constants, tv, activation, opt, skip, ratio, input0, input1, inpu
     cost2 = 0.
     epsilon = 0.0000000001
     with tf.GradientTape() as tape:
-        for i in tf.range(epLen):
+        for i in tf.range(epLen): # Loop through multiple trials
 
             # Sample epoch
             for j in range(4): # loop through target cards
@@ -176,10 +191,10 @@ def train_wcst(constants, tv, activation, opt, skip, ratio, input0, input1, inpu
                 #W = tf.abs(Wraw) * constants['mask']
                 W = Wraw
 
-                # target card + test card
+                # present jth target card + test card
                 timesteps = constants['T_stim_singleCard']
                 u, eta, uskip, uall = compute_uall(u, eta, W, bias, input_curr, constants, skip, ratio, timesteps, activation, t_elapsed, uskip)
-                upenalty += activitypenalty * tf.reduce_mean(uall ** 2)
+                upenalty += activitypenalty * tf.reduce_mean(uall ** 2) # Activity regularization
                 t_elapsed += timesteps
 
             # Response period
@@ -214,9 +229,9 @@ def train_wcst(constants, tv, activation, opt, skip, ratio, input0, input1, inpu
                 input4Var.assign(input4)
 
                 actionOneHot =  tf.one_hot(action0, 4, dtype = tf.float32)
-                input4Var[:,24:28,0].assign(actionOneHot)
-                input4Var[:,28,0].assign(fb)
-                input4Var[:,29,0].assign(1-fb)
+                input4Var[:,24:28,0].assign(actionOneHot) # Action taken
+                input4Var[:,28,0].assign(fb) # Positive feedback
+                input4Var[:,29,0].assign(1-fb) # Negative feedback
             input4_curr = Win @ input4Var
 
             # Feedback period
@@ -225,7 +240,7 @@ def train_wcst(constants, tv, activation, opt, skip, ratio, input0, input1, inpu
             upenalty += activitypenalty * tf.reduce_mean(uall ** 2)
             t_elapsed += timesteps
 
-            # Auxiliary target - hypothesized rules
+            # Auxiliary target - hypothesized rules (i.e card dimensions)
             X = tf.expand_dims(action0, 1)
             X = tf.expand_dims(tf.tile(X, [1, constants['N_stim_singleCard']]), 2)
             Y = tf.gather_nd(input1, X, batch_dims=2)
@@ -249,7 +264,7 @@ def train_wcst(constants, tv, activation, opt, skip, ratio, input0, input1, inpu
             upenalty += activitypenalty * tf.reduce_mean(uall ** 2)
             t_elapsed += timesteps
 
-            # Auxiliary loss
+            # Auxiliary loss (output computed from hidden state during ITI)
             logits = (Wout @ uall)[:, :, :, 0]
             pred2 = tf.nn.softmax(logits[:, :, 4:], axis=2)
             pred2 = tf.where(pred2 == 1, pred2 - epsilon, pred2)
@@ -262,7 +277,7 @@ def train_wcst(constants, tv, activation, opt, skip, ratio, input0, input1, inpu
             cost2 = cost2 + X
             cost = cost + constants['ruleSupWt']*X
 
-        wreg = 0.0001 * tf.math.reduce_sum(tf.math.square(W))
+        wreg = 0.0001 * tf.math.reduce_sum(tf.math.square(W)) # Weight regularization
 
         loss =  cost+upenalty+wreg
         grads = tape.gradient(loss, tv)
@@ -274,23 +289,23 @@ def train_wcst(constants, tv, activation, opt, skip, ratio, input0, input1, inpu
 
 
 # -------------------------------------------------------
-# Final training function
-# NO TRACING HERE
+# Setup each run/epoch for training
 # -------------------------------------------------------
 def train(constants,tv,task,activation,opt,skip,ratio,iterations):
 
+    # 2afc setup
     if task == '2afc-reversal':
-        input0 = np.zeros([constants['batchSize'], constants['N_stim'], 1])
-        input1 = np.zeros([constants['batchSize'], constants['N_stim'], 1])
-        input2 = np.zeros([constants['batchSize'], constants['N_stim'], 1])
+        input0 = np.zeros([constants['batchSize'], constants['N_stim'], 1]) # Zero input
+        input1 = np.zeros([constants['batchSize'], constants['N_stim'], 1]) # Sample stim input
+        input2 = np.zeros([constants['batchSize'], constants['N_stim'], 1]) # Feedback input
         target = np.zeros([constants['batchSize']])
-        for i in range(constants['N_stim']):
-            input1[0:(constants['batchSize']//2), 0] = 1
-            input1[0:(constants['batchSize']//2), 3] = 1
+        for i in range(constants['N_stim']): # Generate each sample stim
+            input1[0:(constants['batchSize']//2), 0] = 1 # Stim identity
+            input1[0:(constants['batchSize']//2), 3] = 1 # Stim location
             # target[0:(constants['batchSize']//2),:] = 0
-            input1[(constants['batchSize']//2):, 1] = 1
-            input1[(constants['batchSize']//2):, 2] = 1
-            target[(constants['batchSize']//2):] = 1
+            input1[(constants['batchSize']//2):, 1] = 1 # Stim identity
+            input1[(constants['batchSize']//2):, 2] = 1 # Stim location
+            target[(constants['batchSize']//2):] = 1 # Target - default to rule 1 (out of 2)
 
         input0 = tf.constant(input0, dtype=tf.float32)
         input1 = tf.constant(input1, dtype=tf.float32)
@@ -300,29 +315,36 @@ def train(constants,tv,task,activation,opt,skip,ratio,iterations):
         costs = []
         penalties = []
 
+        # Training loop
         for iter in tf.range(iterations):
+            # Rule per trial
             ruleState = np.zeros((constants['batchSize'], constants['epLen']), dtype=int)-1
+            # To mask loss on individual trials - particulrly after reversal
             lossMask = np.zeros((constants['batchSize'], constants['epLen']))+1.
             currRule = np.random.randint(2, size=constants['batchSize'])
+            # Randomly generate duration of first rule
             blockLength = constants['blockLen_mn'] + constants['blockLen_sd'] * np.random.randn(constants['batchSize'])
             blockLength = blockLength.astype(int)
             inds = np.arange(constants['batchSize'])
             prev = np.zeros((constants['batchSize']),dtype=int)
+            # Setup rules per trial
             while True:
                 for i,j in enumerate(inds):
                     ruleState[j,prev[i]:(prev[i]+blockLength[i])] = currRule[i]
-                    lossMask[j, prev[i]] = 0
+                    lossMask[j, prev[i]] = 0 # mask loss for first trial after reversal
                 prev = prev+blockLength
+                # Remove subarray corresponding to just setup block of trials
                 currRule = np.delete(currRule, np.nonzero(prev>=constants['epLen']))
                 inds = np.delete(inds, np.nonzero(prev>=constants['epLen']))
                 prev = np.delete(prev, np.nonzero(prev>=constants['epLen']))
-                if prev.size == 0:
+                if prev.size == 0: # break out of loop if we've completed entire batch
                     break
+                # Randomly generate duration of next rule
                 blockLength = constants['blockLen_mn'] + constants['blockLen_sd'] * np.random.randn(
                     prev.shape[0])
                 blockLength = blockLength.astype(int)
                 blockLength = np.where((prev+blockLength) > constants['epLen'], constants['epLen']-prev, blockLength)
-                currRule = 1 - currRule
+                currRule = 1 - currRule # reverse rule
 
             ruleState = tf.constant(ruleState, dtype=tf.float32)
             lossMask = tf.constant(lossMask, dtype=tf.float32)
@@ -330,6 +352,7 @@ def train(constants,tv,task,activation,opt,skip,ratio,iterations):
             fbs = tf.Variable(tf.zeros(shape=(ruleState.shape[1], ruleState.shape[0])), dtype=tf.float32,
                               trainable=False)
 
+            # Train mini-batch
             cost, penalty, wreg = train_2afcrev(constants, tv, activation, opt, skip, ratio, input0, input1, input2, input2Var, target,
                                                 ruleState, fbs, lossMask)
             costs.append(cost.numpy())
@@ -341,12 +364,16 @@ def train(constants,tv,task,activation,opt,skip,ratio,iterations):
                 fbs = np.mean(np.sum(fbs.numpy(), axis=0))
 
                 tf.print(skip, iter, cost, penalty, wreg)
-                print([ruleState, fbs], flush=True)
+                print([ruleState, fbs], flush=True) # To track performance
 
-    elif task == 'wcst':
+    elif task == 'wcst': # wcst setup
+        # Zero input
         input0 = np.zeros([constants['batchSize'], constants['N_stim'], 1])
+        # Target cards for sample stim. input
         input1_np = np.zeros([constants['batchSize'], constants['N_stim_singleCard'], 4, 1])
+        # Zero feedback input (used during sample epoch)
         input3 = np.zeros([constants['batchSize'], constants['N_stim']-2*constants['N_stim_singleCard'], 1])
+        # For feedback epoch input
         input4 = np.zeros([constants['batchSize'], constants['N_stim'], 1])
 
         input1_np[:, [0,4,8], 0] = 1
@@ -364,18 +391,25 @@ def train(constants,tv,task,activation,opt,skip,ratio,iterations):
         rss = []
         fbss = []
 
+        # Training loop
         for iter in tf.range(iterations):
+            # Test card input
             input2 = np.zeros([constants['batchSize'], constants['N_stim_singleCard'], constants['epLen'], 1])
             target = np.zeros([constants['batchSize'], constants['epLen']])
 
+            # Rule per trial
             ruleState = np.zeros((constants['batchSize'], constants['epLen']), dtype=int)-1
+            # Randomly generate duration of first rule
             blockLength = constants['blockLen_mn'] + constants['blockLen_sd'] * np.random.randn(constants['batchSize'])
             blockLength = blockLength.astype(int)
             inds = np.arange(constants['batchSize'])
             prev = np.zeros((constants['batchSize']),dtype=int)
+            # To mask loss on individual trials - particulrly after reversal
             lossMask = np.zeros((constants['batchSize'], constants['epLen'])) + 1.
+            # Setup rules per trial
             while True:
                 for i,j in enumerate(inds):
+                    # Switch to random new rule
                     if prev[i] == 0:
                         currRule = np.random.randint(3)
                     else:
@@ -386,12 +420,14 @@ def train(constants,tv,task,activation,opt,skip,ratio,iterations):
                     lossMaskEnd = prev[i]+2
                     if lossMaskEnd > constants['epLen']:
                         lossMaskEnd = constants['epLen']
-                    lossMask[j, prev[i]:lossMaskEnd] = 0
+                    lossMask[j, prev[i]:lossMaskEnd] = 0 # mask loss for first 2 trial after rule switch
                 prev = prev+blockLength
+                # Remove subarray corresponding to just setup block of trials
                 inds = np.delete(inds, np.nonzero(prev>=constants['epLen']))
                 prev = np.delete(prev, np.nonzero(prev>=constants['epLen']))
                 if prev.size == 0:
                     break
+                # Randomly generate duration of next rule
                 blockLength = constants['blockLen_mn'] + constants['blockLen_sd'] * np.random.randn(
                     prev.shape[0])
                 blockLength = blockLength.astype(int)
@@ -401,6 +437,7 @@ def train(constants,tv,task,activation,opt,skip,ratio,iterations):
             fbs = tf.Variable(tf.zeros(shape=(ruleState.shape[1], ruleState.shape[0])), dtype=tf.float32,
                               trainable=False)
 
+            # Generate test card input and corresponding target
             i1 = np.arange(constants['batchSize'])
             for i in range(constants['epLen']):
                 for k in range(3):
@@ -419,6 +456,7 @@ def train(constants,tv,task,activation,opt,skip,ratio,iterations):
             t0 = tf.constant(np.ones((constants['batchSize'], 3)), dtype=tf.float32)
             tVar = tf.Variable(initial_value=t0, trainable=False, dtype=tf.float32)
 
+            # Train mini-batch
             cost1, cost2, penalty, wreg = train_wcst(constants, tv, activation, opt, skip, ratio, input0, input1, input2, input3, input4, input4Var, target,
                                                      fbs, lossMask, ruleState, t0, tVar)
             costs.append(cost1.numpy()+cost2.numpy())
@@ -435,7 +473,7 @@ def train(constants,tv,task,activation,opt,skip,ratio,iterations):
             
             if iter % 10 == 0:
                 tf.print(skip, iter, cost1, cost2, penalty, wreg)
-                print([ruleState, fbs], flush=True)
+                print([ruleState, fbs], flush=True) # To track performance
 
     return costs, penalties
 
